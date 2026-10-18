@@ -1,12 +1,12 @@
 /**
- * M0 smoke test: (1) `gateway_health` through the real registry + executor,
- * (2) a single-turn chat completion against the gateway.
+ * M0/M1 smoke test:
+ *   1. `gateway_health` through the real registry + executor
+ *   2. a single-turn chat completion against the gateway
+ *   3. M1: a full agent round trip — Echo Ops calls a tool through Groq and answers
  *
  *   npm run smoke
  *
  * Fails fast with a readable message when the gateway is not running.
- * The full LLM client lands in M1 — the single-turn call here is intentionally
- * minimal.
  */
 import "dotenv/config";
 import { loadConfig } from "./core/config.js";
@@ -15,6 +15,8 @@ import { ToolExecutor } from "./core/tools/executor.js";
 import { ToolRegistry } from "./core/tools/registry.js";
 import { createGatewayHealthTool } from "./tools/gateway/health.js";
 import { GatewayError } from "./core/errors.js";
+import { createEchoOpsAgent } from "./agents/echo-ops/agent.js";
+import type { RunEvent } from "./core/types.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -90,11 +92,40 @@ async function main(): Promise<void> {
   const content = body.choices?.[0]?.message?.content ?? "(no content)";
   console.log(`✓ single-turn in ${Date.now() - startedAt}ms (effective model: ${body.model ?? "?"})`);
   console.log(`  ${content}`);
-  console.log("\nM0 smoke test passed.");
+
+  // 3. M1 acceptance: agent loop executes a real tool call through the gateway.
+  console.log("\n→ M1 agent round trip (Echo Ops + gateway_health):");
+  const agent = createEchoOpsAgent({ config });
+  const events: RunEvent[] = [];
+  const agentStart = Date.now();
+  const result = await agent.run("Is the gateway healthy right now? Check it with your tools.", {
+    onEvent: (e) => events.push(e),
+  });
+
+  for (const e of events) {
+    if (e.type === "llm_call") {
+      console.log(`  [llm]    step ${e.step}: ${e.model} in ${e.latencyMs}ms (+${e.usage.total_tokens} tok)`);
+    } else if (e.type === "tool_call") {
+      console.log(
+        `  [tool]   ${e.name} → ${e.ok ? "ok" : "FAILED"} in ${e.durationMs}ms${e.error ? ` (${e.error})` : ""}`,
+      );
+    }
+  }
+
+  if (!result.ok) {
+    throw new Error(`agent run failed after ${result.steps} step(s): ${result.error}`);
+  }
+  const hadToolCall = events.some((e) => e.type === "tool_call" && e.ok);
+  if (!hadToolCall) {
+    throw new Error("agent never executed a tool — no tool-call round trip occurred");
+  }
+  console.log(`  ✓ ${result.steps} step(s), ${result.usage.total_tokens} tokens, ${Date.now() - agentStart}ms`);
+  console.log(`  answer: ${result.content ?? "(empty)"}`);
+  console.log("\nM0/M1 smoke test passed.");
 }
 
 main().catch((err: unknown) => {
-  console.error("\nM0 smoke test FAILED");
+  console.error("\nSmoke test FAILED");
   if (err instanceof GatewayError) {
     console.error(`  ${err.message}`);
     if (err.status === 0) {

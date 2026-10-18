@@ -214,3 +214,47 @@ tests/
 build` emits `dist/`, `npm run smoke` exits 1 with a clear hint while Echo Gate
 is down (it is not running locally yet) and will exercise `gateway_health` +
 a single-turn completion once the gateway is up with a real `GATEWAY_API_KEY`.
+
+## 11. M1 scope (in progress)
+
+- [x] `src/core/llm-client.ts` — OpenAI-compatible client (SPEC §6): per-call
+  `X-Request-ID`, effective-model read-back, `cache_info`/`X-Cache` capture,
+  no streaming, `service_name` passed as `extraBody` (gateway nicety kept out
+  of the runtime)
+- [x] `src/core/agent-loop.ts` — the §7 loop: tool_calls preserved, tool
+  messages carry `tool_call_id`, stop conditions (no tools / MAX_STEPS /
+  token budget / abort), tool errors fed back as `{ok:false,error}`
+- [x] Echo Ops definition (`src/agents/echo-ops/`) — prompt + tool binding +
+  runtime wiring; M1 toolset is `gateway_health` only
+- [x] Hermetic tests: `tests/llm-client.test.ts` (8), `tests/agent-loop.test.ts` (8)
+- [x] **Live round trip through Groq via Echo Gate** — verified 2026-10-18:
+  LLM step 1 → `gateway_health` tool call (ok, ~1s) → LLM step 2 → correct
+  final answer naming the real Celery degradation; 2 steps, 905 tokens.
+
+### M1 environment provisioning (done 2026-10-18, secrets in local `.env` only)
+
+1. Admin key minted in the echo-gate repo:
+   `python -m app.scripts.create_admin_key create --name agent-forge-m1 --scopes 'admin:*'`
+2. Tenant API key created: `POST /api/v1/admin/api-keys/` → tenant `acme`,
+   user `ops-agent` → `GATEWAY_API_KEY` in `.env`
+3. Quota rule created (id 131): tenant `acme` / provider `groq` /
+   model `openai/gpt-oss-20b` → **60 RPM / 200 000 TPM** (default is 10/20 000;
+   quota = **min across all matching rules**, so the pre-existing 9-RPM rule was
+   scoped to tenant `dev` and does not constrain us)
+
+### M1 findings
+
+- **Trace correlation:** the gateway echoes `X-Request-ID` and logs it
+  (`[req_id=...]` in app logs) but does **not** persist it on
+  `/gateway-requests` rows. Durable run↔trace correlation therefore goes
+  through `cache_info.exact_hash` → `GET /gateway-requests/by-hash/{hash}`
+  (the client already captures `cache_info` per call). Worth raising upstream.
+- **Body identity fields:** `tenant_id`/`user_id` in the chat body **override**
+  the API-key identity (body wins), so the client deliberately omits them —
+  the key establishes tenant context (RLS).
+- **Reasoning model:** `openai/gpt-oss-20b` returns `reasoning_content`; the
+  client drops it from the transcript. It also consumes `max_tokens`, so
+  tight budgets can yield empty `content` with `finish_reason: "length"`.
+- **Exact cache keying:** an identical prompt replayed in ~15–30ms with
+  `source` served from cache even with different `max_tokens` — the exact cache
+  appears keyed on model+user text only. Tool turns bypass caches as documented.

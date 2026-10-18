@@ -68,6 +68,16 @@ export class GatewayClient {
     init: RequestInit,
     signal?: AbortSignal,
   ): Promise<T> {
+    const { data } = await this.requestDetailed<T>(path, init, signal);
+    return data;
+  }
+
+  /** Like `request`, but also exposes response headers (e.g. `X-Cache`). */
+  async requestDetailed<T>(
+    path: string,
+    init: RequestInit,
+    signal?: AbortSignal,
+  ): Promise<{ data: T; headers: Headers }> {
     const url = `${this.baseUrl}${path}`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -114,8 +124,8 @@ export class GatewayClient {
       });
     }
 
-    if (res.status === 204) return undefined as T;
-    return (await res.json()) as T;
+    if (res.status === 204) return { data: undefined as T, headers: res.headers };
+    return { data: (await res.json()) as T, headers: res.headers };
   }
 
   private async check(path: string, signal?: AbortSignal): Promise<ServiceCheck> {
